@@ -1,11 +1,9 @@
-# Ultralytics YOLO 🚀, GPL-3.0 license
-
 import hydra
 import torch
 import argparse
 import time
 from pathlib import Path
-
+import math
 import cv2
 import torch
 import torch.backends.cudnn as cudnn
@@ -14,17 +12,47 @@ from ultralytics.yolo.engine.predictor import BasePredictor
 from ultralytics.yolo.utils import DEFAULT_CONFIG, ROOT, ops
 from ultralytics.yolo.utils.checks import check_imgsz
 from ultralytics.yolo.utils.plotting import Annotator, colors, save_one_box
-
+import pandas as pd
 import cv2
 from deep_sort_pytorch.utils.parser import get_config
 from deep_sort_pytorch.deep_sort import DeepSort
 from collections import deque
 import numpy as np
+import csv
+import matplotlib.pyplot as plt
+import seaborn as sns 
+
 palette = (2 ** 11 - 1, 2 ** 15 - 1, 2 ** 20 - 1)
-data_deque = {}
+deq = {}
+indices = [0] * 100
+c = 0
+num = 1
+f = open('/content/pulse.csv', "w+")
+f.close()
+with open('/content/pulse.csv', 'a') as f:
+# create the csv writer
+    writer = csv.writer(f)
+
+    header = ['time', 'pulse']
+    writer.writerow(header)
+    
 
 deepsort = None
 
+object_counter = {}
+
+speed_line_queue = {}
+def estimatespeed(Location1, Location2, h, w):
+    #Euclidean Distance Formula
+    d_pixel = math.sqrt(math.pow(Location2[0] - Location1[0], 2) + math.pow(Location2[1] - Location1[1], 2))
+    # defining thr pixels per meter
+    ppm = max(h, w) // 10
+    d_meters = d_pixel/ppm
+    time_constant = 15*3.6
+    #distance = speed/time
+    speed = d_meters * time_constant
+
+    return int(speed)
 def init_tracker():
     global deepsort
     cfg_deep = get_config()
@@ -48,27 +76,16 @@ def xyxy_to_xywh(*xyxy):
     h = bbox_h
     return x_c, y_c, w, h
 
-def xyxy_to_tlwh(bbox_xyxy):
-    tlwh_bboxs = []
-    for i, box in enumerate(bbox_xyxy):
-        x1, y1, x2, y2 = [int(i) for i in box]
-        top = x1
-        left = y1
-        w = int(x2 - x1)
-        h = int(y2 - y1)
-        tlwh_obj = [top, left, w, h]
-        tlwh_bboxs.append(tlwh_obj)
-    return tlwh_bboxs
 
 def compute_color_for_labels(label):
     """
     Simple function that adds fixed color depending on the class
     """
-    if label == 0: #person
+    if label == 7: #truck
         color = (85,45,255)
     elif label == 2: # Car
         color = (222,82,175)
-    elif label == 3:  # Motobike
+    elif label == 3:  # Motorcycle
         color = (0, 204, 255)
     elif label == 5:  # Bus
         color = (0, 149, 255)
@@ -121,17 +138,24 @@ def UI_box(x, img, color=None, label=None, line_thickness=None):
         cv2.putText(img, label, (c1[0], c1[1] - 2), 0, tl / 3, [225, 255, 255], thickness=tf, lineType=cv2.LINE_AA)
 
 
+def ccw(A,B,C):
+    return (C[1]-A[1]) * (B[0]-A[0]) > (B[1]-A[1]) * (C[0]-A[0])
 
-def draw_boxes(img, bbox, names,object_id, identities=None, offset=(0, 0)):
-    #cv2.line(img, line[0], line[1], (46,162,112), 3)
 
+def draw_boxes(img, bbox, names,object_id,writer, writer2, identities=None, offset=(0, 0)):
     height, width, _ = img.shape
     # remove tracked point from buffer if object is lost
-    for key in list(data_deque):
-      if key not in identities:
-        data_deque.pop(key)
+    global c
+    
+    for key in list(deq):
+        if key not in identities:
+            deq.pop(key)
+
+    weights = [0,0,int(6.72),int(1.638),0,30,0,int(18.75)]
+    speeds = [0] * 8
 
     for i, box in enumerate(bbox):
+        obj_name = names[object_id[i]]
         x1, y1, x2, y2 = [int(i) for i in box]
         x1 += offset[0]
         x2 += offset[0]
@@ -142,27 +166,58 @@ def draw_boxes(img, bbox, names,object_id, identities=None, offset=(0, 0)):
         center = (int((x2+x1)/ 2), int((y2+y2)/2))
 
         # get ID of object
+
         id = int(identities[i]) if identities is not None else 0
 
         # create new buffer for new object
-        if id not in data_deque:  
-          data_deque[id] = deque(maxlen= 64)
+        if id not in deq:  
+            deq[id] = deque(maxlen= 64)
+            if object_id[i] in [2, 3, 5, 7]:
+              c +=1
+              indices[id] = c
+            speed_line_queue[id] = []
         color = compute_color_for_labels(object_id[i])
-        obj_name = names[object_id[i]]
-        label = '{}{:d}'.format("", id) + ":"+ '%s' % (obj_name)
+        
+        
+        label = '{}{:d}'.format("", indices[id]) + ":"+ '%s' % (obj_name)
+        
 
         # add center to buffer
-        data_deque[id].appendleft(center)
+        deq[id].appendleft(center)
+        if len(deq[id]) >= 2:
+            object_speed = estimatespeed(deq[id][1], deq[id][0], x2-x1, y2-y1)
+            speed_line_queue[id].append(object_speed)
+            if obj_name not in object_counter:
+                    object_counter[obj_name] = 1
+        
+        #motorcycle_weight = 1.638
+        #car_weight = 6.72
+        #truck_weight = 18.75
+        #bus_weight = 30
+
+        try:
+            spd = sum(speed_line_queue[id])//len(speed_line_queue[id])
+            speeds[object_id[i]] += spd
+            label = label + " v=" + str(spd) + " m=" + str(weights[object_id[i]])
+            writer2.writerow([str(indices[id]), obj_name, str(spd), str(weights[object_id[i]])])
+
+        except:
+            pass
         UI_box(box, img, label=label, color=color, line_thickness=2)
-        # draw trail
-        for i in range(1, len(data_deque[id])):
-            # check if on buffer value is none
-            if data_deque[id][i - 1] is None or data_deque[id][i] is None:
-                continue
-            # generate dynamic thickness of trails
-            thickness = int(np.sqrt(64 / float(i + i)) * 1.5)
-            # draw trails
-            cv2.line(img, data_deque[id][i - 1], data_deque[id][i], color, thickness)
+    #cv2.putText(img, f"{speeds}", (500, 50), 0, 1, [0, 255, 0], thickness=2, lineType=cv2.LINE_AA)
+    t = time.localtime()
+    current_time = time.strftime("%H:%M:%S %d.%m.%Y", t)
+    pulse = sum(np.multiply(speeds, weights))
+    
+    # write a row to the csv file
+    writer.writerow([f"{current_time}", f"{pulse}"])
+
+    cv2.putText(img, f"pulse: {pulse}", (500, 50), 0, 1, [0, 255, 0], thickness=2, lineType=cv2.LINE_AA)
+    #for i, object_speed in enumerate(speeds):
+    #  object_speed = sum(object_speed)*weights[i]
+    
+    
+    
     return img
 
 
@@ -181,6 +236,7 @@ class DetectionPredictor(BasePredictor):
         preds = ops.non_max_suppression(preds,
                                         self.args.conf,
                                         self.args.iou,
+                                        classes = [2, 3, 5, 7],
                                         agnostic=self.args.agnostic_nms,
                                         max_det=self.args.max_det)
 
@@ -191,6 +247,7 @@ class DetectionPredictor(BasePredictor):
         return preds
 
     def write_results(self, idx, preds, batch):
+        global num
         p, im, im0 = batch
         all_outputs = []
         log_string = ""
@@ -214,8 +271,12 @@ class DetectionPredictor(BasePredictor):
         all_outputs.append(det)
         if len(det) == 0:
             return log_string
+
+        count = 0
         for c in det[:, 5].unique():
+            count += 1
             n = (det[:, 5] == c).sum()  # detections per class
+            cv2.putText(im0, f"{n} {self.model.names[int(c)]}", (11, count*50), 0, 1, [0, 255, 0], thickness=2, lineType=cv2.LINE_AA)
             log_string += f"{n} {self.model.names[int(c)]}{'s' * (n > 1)}, "
         # write
         gn = torch.tensor(im0.shape)[[1, 0, 1, 0]]  # normalization gain whwh
@@ -233,13 +294,42 @@ class DetectionPredictor(BasePredictor):
         confss = torch.Tensor(confs)
           
         outputs = deepsort.update(xywhs, confss, oids, im0)
-        if len(outputs) > 0:
-            bbox_xyxy = outputs[:, :4]
-            identities = outputs[:, -2]
-            object_id = outputs[:, -1]
+        
+        with open('/content/pulse.csv', 'a') as f:
+            # create the csv writer
+                writer = csv.writer(f)
+                if len(outputs) > 0:
+                    bbox_xyxy = outputs[:, :4]
+                    identities = outputs[:, -2]
+                    object_id = outputs[:, -1]
             
-            draw_boxes(im0, bbox_xyxy, self.model.names, object_id,identities)
+                    f2 = open('/content/vehicles_data.csv', "w+")
+                    f2.close()
+                    with open('/content/vehicles_data.csv', 'a') as f:
+                        writer2 = csv.writer(f)
+                        header = ['id', 'class', 'speed', 'weight']
+                        writer2.writerow(header)
+                        draw_boxes(im0, bbox_xyxy, self.model.names, object_id,writer, writer2, identities)
+        df = pd.read_csv("/content/pulse.csv")
+        df['time'] = pd.to_datetime(df['time'], format = '%H:%M:%S  %d.%m.%Y')
+        
 
+        df.index = df['time']
+        del df['time']
+        
+        try:
+            fig, ax = plt.subplots()
+            #plt.clf()
+            sns.lineplot(df)
+            #ax.set_xticklabels([t.get_text().split(".")[0] for t in ax.get_xticklabels()])
+            ax.set_xticklabels([pd.to_datetime(t.get_text()).strftime('%H:%M:%S') for t in ax.get_xticklabels()])
+            plt.ylabel('Pulse')
+            plt.xlabel('time')
+            plt.savefig(f'/content/time_series/figure_{num:010d}.png')
+            num += 1
+        except:
+          log_string += f'An error occured while saving figure_{num:010d}.png, '
+      
         return log_string
 
 

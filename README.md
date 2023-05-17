@@ -1,1 +1,1 @@
-Тетрадка по ссылке: 
+Тетрадка по ссылке: YOLOv8_DeepSORT_Object_Tracking_and_Pulse_Estimation.ipynb
